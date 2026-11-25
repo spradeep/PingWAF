@@ -1550,7 +1550,6 @@ export const ACME_DNS_PROVIDERS = [
   'aliyun',
   'dnspod',
   'huawei',
-  'manual',
 ] as const
 
 export type TlsVersion = '1.0' | '1.1' | '1.2' | '1.3'

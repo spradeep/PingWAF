@@ -1858,7 +1858,7 @@ pub async fn start_data_plane(
     );
     let config_manager =
         try_init_memory_config_manager(&toml_str, Some(acme_state)).map_err(
-            |e| anyhow::anyhow!("failed to init config manager: {}", e),
+            |_| anyhow::anyhow!("failed to initialize proxy configuration"),
         )?;
 
     // The lets-encrypt task scans current_config for certificates to issue,
@@ -1868,9 +1868,8 @@ pub async fn start_data_plane(
         .and_then(|toml_config| toml_config.to_pingap_config(true))
     {
         Ok(merged) => merged,
-        Err(e) => {
+        Err(_) => {
             warn!(target: LOG_TARGET,
-                error = %e,
                 "data plane: merged config failed validation, using freshly converted config"
             );
             config
@@ -2311,12 +2310,11 @@ async fn apply_reload(
         .await
     {
         Ok(config) => config,
-        Err(e) => {
+        Err(_) => {
             warn!(target: LOG_TARGET,
-                error = %e,
                 "data plane: merged reload config failed, using freshly converted config"
             );
-            errors.push(format!("merge config: {e}"));
+            errors.push("merge config failed".to_string());
             converted
         },
     };

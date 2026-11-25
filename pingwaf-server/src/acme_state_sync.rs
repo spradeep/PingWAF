@@ -47,6 +47,7 @@ struct AcmeState {
 
 #[derive(Debug, Default, Deserialize)]
 struct AcmeCertificate {
+    acme: Option<String>,
     #[serde(default)]
     domains: String,
     #[serde(default)]
@@ -119,7 +120,8 @@ async fn sync_once(
         let Some(site_id) = site_id_from_key(name) else {
             continue;
         };
-        if cert.domains.trim().is_empty()
+        if cert.acme.as_deref().is_none_or(str::is_empty)
+            || cert.domains.trim().is_empty()
             || cert.tls_cert.trim().is_empty()
             || cert.tls_key.trim().is_empty()
         {
@@ -159,14 +161,19 @@ async fn sync_certificate(
     // A site can own several certificates. Reordered SANs identify the same
     // set, while an arbitrary first row can distribute another site's key.
     let names = |value: &str| -> std::collections::BTreeSet<String> {
-        value.split(',').map(|name| name.trim().to_ascii_lowercase()).collect()
+        value
+            .split(',')
+            .map(|name| name.trim().to_ascii_lowercase())
+            .collect()
     };
     let expected = names(domains);
     let candidates = site_certificates::Entity::find()
         .filter(site_certificates::Column::SiteId.eq(site_id))
         .all(&state.db)
         .await?;
-    let mut matches = candidates.into_iter().filter(|row| names(&row.domain) == expected);
+    let mut matches = candidates
+        .into_iter()
+        .filter(|row| names(&row.domain) == expected);
     let row = matches.next();
     if matches.next().is_some() {
         warn!(%site_id, domains, "ambiguous certificate rows for ACME state");
@@ -197,6 +204,16 @@ async fn sync_certificate(
         return Ok(false);
     }
 
+    let hostnames: Vec<_> = expected.into_iter().collect();
+    if !site_cert::covers(cert_pem, &hostnames)
+        || crate::api::validation::validate_certificate_and_key(
+            cert_pem, key_pem,
+        )
+        .is_err()
+    {
+        warn!(%site_id, domains, "ACME state PEM or key does not match certificate configuration");
+        return Ok(false);
+    }
     let mut active: site_certificates::ActiveModel = row.clone().into();
     active.cert_pem = Set(Some(cert_pem.to_string()));
     active.key_pem = Set(Some(key_pem.to_string()));
@@ -300,6 +317,7 @@ mod tests {
             r#"
 [certificates.11111111-1111-1111-1111-111111111111_cert]
 domains = "example.com,www.example.com"
+acme = "enabled"
 tls_cert = "CERT"
 tls_key = "KEY"
 

@@ -2323,10 +2323,10 @@ mod tests {
         BasicConf, LocationConf, PluginCategory, ServerConf, UpstreamConf,
     };
     use super::{CATEGORY_BASIC, CATEGORY_UPSTREAM, convert_pingap_config};
-    use super::{ROUTE53_SERVICE_URL, parse_route53_service_url};
     use super::{
         CertificateConf, Hashable, PingapConfig, Validate, validate_cert,
     };
+    use super::{ROUTE53_SERVICE_URL, parse_route53_service_url};
     use bytesize::ByteSize;
     use pingap_core::PluginStep;
     use pingap_util::base64_encode;

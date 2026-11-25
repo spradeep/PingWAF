@@ -1269,7 +1269,7 @@ Add a certificate (manual upload or ACME request).
 }
 ```
 
-`acme_challenge_type` is `http-01` or `dns-01`; `acme_dns_provider` is one of `cloudflare`, `route53`, `aliyun`, `dnspod`, `huawei`, `manual`.
+`acme_challenge_type` is `http-01` or `dns-01`; `acme_dns_provider` is one of `cloudflare`, `route53`, `aliyun`, `dnspod`, or `huawei` for managed DNS-01.
 
 With `route53`, use `dns-01` and set `acme_dns_config` to
 `{"hosted_zone_id":"Z123EXAMPLE"}` or `{}` for public hosted zone discovery.

@@ -624,8 +624,16 @@ pub(super) fn validate_acme_dns_provider(
     challenge: Option<&str>,
     config: Option<&serde_json::Value>,
 ) -> Result<(), ApiError> {
-    let provider = pingap_config::normalize_dns_provider(provider.unwrap_or_default())
-        .ok_or_else(|| ApiError::BadRequest("unsupported ACME DNS provider".into()))?;
+    let provider =
+        pingap_config::normalize_dns_provider(provider.unwrap_or_default())
+            .ok_or_else(|| {
+                ApiError::BadRequest("unsupported ACME DNS provider".into())
+            })?;
+    if provider == "manual" && challenge == Some(acme_challenge::DNS_01) {
+        return Err(ApiError::BadRequest(
+            "managed DNS-01 requires an automated DNS provider".into(),
+        ));
+    }
     if provider != "route53" {
         return Ok(());
     }
@@ -658,18 +666,27 @@ fn validates_route53_credential_free_configuration() {
     let dns01 = Some(acme_challenge::DNS_01);
     assert!(validate_acme_dns_provider(Some("Route53"), dns01, None).is_ok());
     assert!(validate_acme_dns_provider(
-        Some("route53"), dns01,
+        Some("route53"),
+        dns01,
         Some(&serde_json::json!({"hosted_zone_id": "/hostedzone/Z123"})),
-    ).is_ok());
+    )
+    .is_ok());
     assert!(validate_acme_dns_provider(Some("route53"), None, None).is_err());
     assert!(validate_acme_dns_provider(Some("unknown"), dns01, None).is_err());
     assert!(validate_acme_dns_provider(Some("dnspod"), dns01, None).is_ok());
+    assert!(validate_acme_dns_provider(None, dns01, None).is_err());
+    assert!(validate_acme_dns_provider(Some("manual"), dns01, None).is_err());
     for config in [
         serde_json::json!({"hosted_zone_id": "bad id"}),
         serde_json::json!({"endpoint": "https://example.com"}),
         serde_json::json!({"access_key_id": "example"}),
     ] {
-        assert!(validate_acme_dns_provider(Some("route53"), dns01, Some(&config)).is_err());
+        assert!(validate_acme_dns_provider(
+            Some("route53"),
+            dns01,
+            Some(&config)
+        )
+        .is_err());
     }
 }
 
