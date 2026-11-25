@@ -923,6 +923,14 @@ fn convert_cached_rules(
     cached: &CachedRules,
     cache_dir: &Path,
 ) -> PingapConfig {
+    // Opt-in: forward standard reverse-proxy headers to upstreams.
+    // Disabled by default for backward compatibility.
+    let enable_reverse_proxy_headers = env_flag_is_true(
+        std::env::var("PINGWAF_ENABLE_REVERSE_PROXY_HEADERS")
+            .ok()
+            .as_deref(),
+    );
+
     // The cache plugin carries no per-site settings of its own — rules,
     // namespaces and quotas all flow from the agent's rule cache at request
     // time. It only earns a slot in the config when some site actually has
@@ -1246,6 +1254,9 @@ fn convert_cached_rules(
                     host: Some(host.clone()),
                     path: Some("/".to_string()),
                     plugins: Some(site_plugins.clone()),
+                    enable_reverse_proxy_headers: Some(
+                        enable_reverse_proxy_headers,
+                    ),
                     // The fallback must sort behind every route: with the
                     // auto weight (128) any route whose priority was 127 or
                     // less ranked below this catch-all `/` location and
@@ -1302,6 +1313,9 @@ fn convert_cached_rules(
                     upstream: Some(target),
                     host: Some(host.clone()),
                     path: Some(path),
+                    enable_reverse_proxy_headers: Some(
+                        enable_reverse_proxy_headers,
+                    ),
                     weight: route
                         .priority
                         .map(|p| p.clamp(1, u16::MAX as i32) as u16),
@@ -2047,6 +2061,26 @@ pub async fn start_data_plane(
             logger: None,
         };
         let mut ps = ProxyServer::new(&server_conf, ctx)?;
+        if env_flag_is_true(
+            std::env::var("PINGWAF_ENABLE_REVERSE_PROXY_HEADERS")
+                .ok()
+                .as_deref(),
+        ) {
+            ps.site_proxy_trust = Some(|host| {
+                let Some(site) = pingwaf_agent::PingWafAgent::instance()
+                    .and_then(|agent| agent.get_rules_for_domain(host))
+                else {
+                    return pingap_core::ProxyTrust::default();
+                };
+                let trust = &site.proxy_trust;
+                pingap_core::ProxyTrust::new(
+                    trust.enabled,
+                    trust.effective_header(),
+                    trust.last_hop_only,
+                    &trust.trusted_ranges,
+                )
+            });
+        }
         // The HTTP-01 challenge must be reachable on port 80, so every
         // data-plane server whose address list includes :80 intercepts
         // /.well-known/acme-challenge before proxying.
