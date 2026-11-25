@@ -1269,7 +1269,11 @@ Add a certificate (manual upload or ACME request).
 }
 ```
 
-`acme_challenge_type` is `http-01` or `dns-01`; `acme_dns_provider` is one of `cloudflare`, `route53`, `digitalocean`, `aliyun`, `dnspod`, `cloudxns`, `manual`.
+`acme_challenge_type` is `http-01` or `dns-01`; `acme_dns_provider` is one of `cloudflare`, `route53`, `aliyun`, `dnspod`, `huawei`, `manual`.
+
+With `route53`, use `dns-01` and set `acme_dns_config` to
+`{"hosted_zone_id":"Z123EXAMPLE"}` or `{}` for public hosted zone discovery.
+The agent uses AWS SDK credentials, typically an EC2 instance role.
 
 The response is the saved certificate, `warnings` included (see
 [Certificate `warnings`](#certificate-warnings)).

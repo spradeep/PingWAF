@@ -139,10 +139,50 @@ pub fn normalize_dns_provider(value: &str) -> Option<&'static str> {
         "" | "manual" => Some(DNS_PROVIDER_MANUAL),
         "ali" | "aliyun" => Some("ali"),
         "cf" | "cloudflare" => Some("cf"),
-        "tencent" => Some("tencent"),
+        "tencent" | "dnspod" => Some("tencent"),
         "huawei" => Some("huawei"),
+        "route53" => Some("route53"),
         _ => None,
     }
+}
+
+pub const ROUTE53_SERVICE_URL: &str = "https://route53.amazonaws.com";
+
+/// Accept the bare AWS zone ID and the resource path returned by Route 53.
+pub fn route53_zone_id(value: &str) -> Option<&str> {
+    let value = value.strip_prefix("/hostedzone/").unwrap_or(value);
+    (!value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()))
+    .then_some(value)
+}
+
+/// Route 53 uses the AWS SDK's endpoint and credentials. The service URL
+/// carries only the optional hosted zone ID across the existing ACME interface.
+pub fn parse_route53_service_url(value: &str) -> Result<Option<String>> {
+    let invalid = || Error::Invalid {
+        message: "Route 53 DNS configuration only accepts hosted_zone_id"
+            .into(),
+    };
+    let url = url::Url::parse(value).map_err(|_| invalid())?;
+    if url.origin().ascii_serialization() != ROUTE53_SERVICE_URL
+        || url.path() != "/"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    let mut zone = None;
+    for (key, value) in url.query_pairs() {
+        if key != "hosted_zone_id" || zone.is_some() {
+            return Err(invalid());
+        }
+        zone = Some(route53_zone_id(&value).ok_or_else(invalid)?.to_owned());
+    }
+    Ok(zone)
 }
 
 /// Configuration struct for TLS/SSL certificates
@@ -289,9 +329,22 @@ impl Validate for CertificateConf {
         {
             return Err(Error::Invalid {
                 message: format!(
-                    "Invalid dns_provider({dns_provider}), expect one of: ali, cf, tencent, huawei, manual"
+                    "Invalid dns_provider({dns_provider}), expect one of: ali, cf, tencent, huawei, route53, manual"
                 ),
             });
+        }
+
+        if self
+            .dns_provider
+            .as_deref()
+            .and_then(normalize_dns_provider)
+            == Some("route53")
+            && let Some(url) = self
+                .dns_service_url
+                .as_deref()
+                .filter(|url| !url.is_empty())
+        {
+            parse_route53_service_url(url)?;
         }
 
         Ok(())
@@ -2270,6 +2323,7 @@ mod tests {
         BasicConf, LocationConf, PluginCategory, ServerConf, UpstreamConf,
     };
     use super::{CATEGORY_BASIC, CATEGORY_UPSTREAM, convert_pingap_config};
+    use super::{ROUTE53_SERVICE_URL, parse_route53_service_url};
     use super::{
         CertificateConf, Hashable, PingapConfig, Validate, validate_cert,
     };
@@ -3270,6 +3324,28 @@ upstream_connect_offload_thread_per_pool = 8
                 err.contains("upstream accept encoding"),
                 "{value} must be refused, got: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn route53_url_allows_only_an_optional_hosted_zone() {
+        assert_eq!(
+            parse_route53_service_url(ROUTE53_SERVICE_URL).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_route53_service_url("https://route53.amazonaws.com?hosted_zone_id=%2Fhostedzone%2FZ123")
+                .unwrap(),
+            Some("Z123".into()),
+        );
+        for url in [
+            "http://route53.amazonaws.com",
+            "https://example.com?hosted_zone_id=Z123",
+            "https://route53.amazonaws.com?token=example",
+            "https://route53.amazonaws.com?hosted_zone_id=Z123&hosted_zone_id=Z456",
+            "https://route53.amazonaws.com?hosted_zone_id=",
+        ] {
+            assert!(parse_route53_service_url(url).is_err(), "{url}");
         }
     }
 

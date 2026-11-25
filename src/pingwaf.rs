@@ -1340,10 +1340,7 @@ fn convert_cached_rules(
             location_names.push(loc_name);
         }
 
-        // Convert SSL certificate: an uploaded PEM is served as-is, while a
-        // site asking for ACME without one gets a certificate entry the
-        // lets-encrypt task issues against — and later fills in — inside
-        // this config.
+        // Convert the TLS material and renewal settings for the site.
         if let Some(ref ssl) = site.ssl_config
             && ssl.enabled
         {
@@ -1358,18 +1355,7 @@ fn convert_cached_rules(
                 );
                 d.join(",")
             };
-            let cert = if !ssl.cert_pem.is_empty() {
-                Some(CertificateConf {
-                    domains: Some(domains),
-                    tls_cert: Some(ssl.cert_pem.clone()),
-                    tls_key: Some(ssl.key_pem.clone()),
-                    ..Default::default()
-                })
-            } else if ssl.acme_enabled && !ssl.acme_email.is_empty() {
-                acme_certificate_conf(ssl, domains)
-            } else {
-                None
-            };
+            let cert = site_certificate_conf(ssl, domains);
             if let Some(cert) = cert {
                 certificates.insert(format!("{site_id}_cert"), cert);
             }
@@ -1565,13 +1551,42 @@ fn build_reload_config(rule_cache: &RuleCache) -> PingapConfig {
     convert_cached_rules(&rule_cache.all_sites(), rule_cache.cache_dir())
 }
 
+fn site_certificate_conf(
+    ssl: &SslConfig,
+    domains: String,
+) -> Option<CertificateConf> {
+    let acme_enabled = ssl.acme_enabled && !ssl.acme_email.is_empty();
+    if ssl.cert_pem.is_empty() {
+        return acme_enabled
+            .then(|| acme_certificate_conf(ssl, domains))
+            .flatten();
+    }
+
+    // An issued Route 53 PEM comes back through config sync. Keep its ACME
+    // settings so the issuer can check expiry and renew it after reload.
+    if acme_enabled
+        && ssl.acme_challenge_type == "AcmeDns01"
+        && normalize_dns_provider(&ssl.acme_dns_provider) == Some("route53")
+        && let Some(mut config) = acme_certificate_conf(ssl, domains.clone())
+    {
+        config.tls_cert = Some(ssl.cert_pem.clone());
+        config.tls_key = Some(ssl.key_pem.clone());
+        return Some(config);
+    }
+    Some(CertificateConf {
+        domains: Some(domains),
+        tls_cert: Some(ssl.cert_pem.clone()),
+        tls_key: Some(ssl.key_pem.clone()),
+        ..Default::default()
+    })
+}
+
 /// Build the certificate entry a lets-encrypt issuance is driven by.
 ///
 /// `acme` is only a marker (never parsed); the email keeps the convention
 /// legacy pingap used so operators recognize it in a config dump. DNS-01
-/// carries the provider plus credentials: the endpoint defaults to the
-/// provider's API host and every `acme_dns_config` entry becomes a query
-/// pair — the layout pingap's DNS tasks parse.
+/// passes provider options through `dns_service_url`. Route 53 uses the AWS
+/// credential chain and only passes the optional hosted zone ID.
 /// Returns `None` when the order cannot be issued and must be skipped:
 /// a wildcard hostname only validates through DNS-01, so an entry that would
 /// fall back to HTTP-01 is dropped (with an error log) instead of making the
@@ -1632,23 +1647,32 @@ fn acme_certificate_conf(
     Some(cert)
 }
 
-/// The DNS provider endpoint with credentials appended as query pairs.
+/// The DNS provider endpoint with provider-specific options as query pairs.
 ///
-/// An explicit `endpoint` entry (full URL, or host getting the default
-/// scheme) wins; `region` is only used to build the Huawei cloud host.
-/// Without either, the provider's documented API host applies — Huawei has
-/// per-region hosts and cannot have one. Every other entry becomes
-/// `key=value` — names match what the provider task expects, e.g.
-/// `access_key_id` / `access_key_secret` / `token`.
+/// Route 53 uses its fixed service endpoint and the optional hosted zone ID.
+/// Other providers accept an explicit `endpoint` and pass their remaining
+/// options as query pairs. Huawei uses `region` to build the endpoint when
+/// one is absent.
 fn acme_dns_service_url(
     provider: &str,
     config: &HashMap<String, String>,
 ) -> Option<String> {
+    if provider == "route53" {
+        let base = pingap_config::ROUTE53_SERVICE_URL;
+        return Some(match config.get("hosted_zone_id") {
+            Some(id) => {
+                format!("{base}?hosted_zone_id={}", urlencoding::encode(id))
+            },
+            None => base.to_string(),
+        });
+    }
     let base = match config.get("endpoint").filter(|v| !v.is_empty()) {
         Some(v) if v.contains("://") => v.clone(),
         Some(v) => format!("https://{v}"),
         None => {
-            if let Some(region) = config.get("region").filter(|r| !r.is_empty())
+            if provider == "huawei"
+                && let Some(region) =
+                    config.get("region").filter(|r| !r.is_empty())
             {
                 format!("https://dns.{region}.myhuaweicloud.com")
             } else if provider == "huawei" {
@@ -4906,6 +4930,64 @@ mod tests {
         assert!(url.starts_with("https://alidns.aliyuncs.com?"), "{url}");
         assert!(url.contains("access_key_id=AK%201%2F2"), "{url}");
         assert!(url.contains("access_key_secret=s3cret"), "{url}");
+    }
+
+    #[test]
+    fn route53_keeps_apex_and_wildcard_in_one_dns_order() {
+        let mut ssl = acme_ssl();
+        ssl.acme_challenge_type = "AcmeDns01".to_string();
+        ssl.acme_dns_provider = "Route53".to_string();
+        ssl.acme_dns_config
+            .insert("hosted_zone_id".into(), "/hostedzone/Z123".into());
+        let domains = "example.com,*.example.com";
+        let cert = acme_certificate_conf(&ssl, domains.into()).unwrap();
+        assert_eq!(cert.domains.as_deref(), Some(domains));
+        assert_eq!(cert.dns_challenge, Some(true));
+        assert_eq!(cert.dns_provider.as_deref(), Some("route53"));
+        assert_eq!(
+            pingap_config::parse_route53_service_url(
+                cert.dns_service_url.as_deref().unwrap()
+            )
+            .unwrap(),
+            Some("Z123".into()),
+        );
+    }
+
+    #[test]
+    fn synced_route53_pem_retains_renewal_configuration() {
+        let mut ssl = acme_ssl();
+        ssl.acme_enabled = true;
+        ssl.acme_challenge_type = "AcmeDns01".into();
+        ssl.acme_dns_provider = "route53".into();
+        ssl.cert_pem = "issued PEM".into();
+        ssl.key_pem = "issued key".into();
+        let domains = "example.com,*.example.com";
+        let cert = site_certificate_conf(&ssl, domains.into()).unwrap();
+        assert_eq!(cert.tls_cert.as_deref(), Some("issued PEM"));
+        assert!(cert.acme.is_some());
+        assert_eq!(cert.dns_provider.as_deref(), Some("route53"));
+
+        ssl.acme_enabled = false;
+        let cert = site_certificate_conf(&ssl, domains.into()).unwrap();
+        assert_eq!(cert.tls_cert.as_deref(), Some("issued PEM"));
+        assert!(cert.acme.is_none());
+    }
+
+    #[test]
+    fn regional_endpoint_applies_only_to_huawei() {
+        let config = HashMap::from([("region".into(), "test-region".into())]);
+        for (provider, endpoint) in [
+            ("huawei", "https://dns.test-region.myhuaweicloud.com"),
+            ("route53", "https://route53.amazonaws.com"),
+            ("cf", "https://api.cloudflare.com"),
+            ("ali", "https://alidns.aliyuncs.com"),
+            ("tencent", "https://dnspod.tencentcloudapi.com"),
+        ] {
+            assert_eq!(
+                acme_dns_service_url(provider, &config).as_deref(),
+                Some(endpoint)
+            );
+        }
     }
 
     #[test]

@@ -1013,7 +1013,9 @@ export function GlobalSslPage() {
                         </Button>
                       </div>
                       <p className="text-xs text-fg-subtle">
-                        {t('pages.sslGlobal.dnsConfigHint')}
+                        {t(form.dnsProvider === 'route53'
+                          ? 'pages.sslGlobal.dnsConfigRoute53Hint'
+                          : 'pages.sslGlobal.dnsConfigHint')}
                       </p>
                       {form.dnsProvider === 'huawei' && (
                         <p className="text-xs text-fg-subtle">

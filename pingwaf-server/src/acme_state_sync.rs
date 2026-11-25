@@ -102,13 +102,13 @@ async fn sync_once(
     let text = std::fs::read_to_string(path)?;
     let parsed: AcmeState = match toml::from_str(&text) {
         Ok(parsed) => parsed,
-        Err(err) => {
+        Err(_) => {
             // The data plane writes atomically, but a malformed file must not
             // take the control plane down or retry in a tight loop. Wait for
             // the next write before trying again.
             *last_modified = modified;
             return Err(anyhow::anyhow!(
-                "cannot parse {}: {err}",
+                "cannot parse ACME state file {}",
                 path.display()
             ));
         },
@@ -156,23 +156,22 @@ async fn sync_certificate(
     cert_pem: &str,
     key_pem: &str,
 ) -> anyhow::Result<bool> {
-    let row = site_certificates::Entity::find()
-        .filter(site_certificates::Column::SiteId.eq(site_id))
-        .filter(site_certificates::Column::Domain.eq(domains.to_string()))
-        .one(&state.db)
-        .await?;
-    // Older rows may have the domains in another order or the alternate
-    // domain as the primary string. Fall back to the site's row only when the
-    // exact domain match found nothing.
-    let row = match row {
-        Some(row) => Some(row),
-        None => {
-            site_certificates::Entity::find()
-                .filter(site_certificates::Column::SiteId.eq(site_id))
-                .one(&state.db)
-                .await?
-        },
+    // A site can own several certificates. Reordered SANs identify the same
+    // set, while an arbitrary first row can distribute another site's key.
+    let names = |value: &str| -> std::collections::BTreeSet<String> {
+        value.split(',').map(|name| name.trim().to_ascii_lowercase()).collect()
     };
+    let expected = names(domains);
+    let candidates = site_certificates::Entity::find()
+        .filter(site_certificates::Column::SiteId.eq(site_id))
+        .all(&state.db)
+        .await?;
+    let mut matches = candidates.into_iter().filter(|row| names(&row.domain) == expected);
+    let row = matches.next();
+    if matches.next().is_some() {
+        warn!(%site_id, domains, "ambiguous certificate rows for ACME state");
+        return Ok(false);
+    }
     let Some(row) = row else {
         // The file can outlive a deleted certificate row. Not an error: the
         // next issuance or a site edit removes it.
